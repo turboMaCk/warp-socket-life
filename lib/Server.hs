@@ -1,4 +1,80 @@
-module Server (someFunc) where
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-someFunc :: IO ()
-someFunc = putStrLn "someFunc"
+module Server where
+
+import Network.Wai (Application)
+
+import qualified Vendor
+
+import qualified Control.Exception as Exception
+import qualified Data.Streaming.Network as Network
+import qualified Network.Socket as Socket
+import qualified Network.Wai.Handler.Warp as Warp
+import qualified Network.Wai.Handler.Warp.Internal as WarpInternal
+
+-- | Run an 'Application' on the given port.
+run :: Warp.Port -> Application -> IO ()
+run p = runSettings $ Warp.setPort p Warp.defaultSettings
+
+{- | Run an 'Application' with the given 'Settings'.
+This opens a listen socket on the port defined in 'Settings' and
+calls 'runSettingsSocket'.
+-}
+runSettings :: Warp.Settings -> Application -> IO ()
+runSettings settings app =
+    Socket.withSocketsDo $
+        Exception.bracket
+            (Network.bindPortTCP (Warp.getPort settings) (Warp.getHost settings))
+            Socket.close
+            ( \socket -> do
+                WarpInternal.setSocketCloseOnExec socket
+                runSettingsSocket settings socket app
+            )
+
+{- | This installs a shutdown handler for the given socket and
+calls 'runSettingsConnection' with the default connection setup action
+which handles plain (non-cipher) HTTP.
+When the listen socket in the second argument is closed, all live
+connections are gracefully shut down.
+
+The supplied socket can be a Unix named socket, which
+can be used when reverse HTTP proxying into your application.
+
+Note that the 'settingsPort' will still be passed to 'Application's via the
+'serverPort' record.
+-}
+runSettingsSocket :: Warp.Settings -> Socket.Socket -> Application -> IO ()
+runSettingsSocket settings socket app = do
+    WarpInternal.settingsInstallShutdownHandler settings closeListenSocket
+    runSettingsConnection settings getConn app
+  where
+    getConn = do
+        -- (s, sa) <- Socket.accept socket
+        (s, sa) <- (WarpInternal.settingsAccept settings) socket
+        WarpInternal.setSocketCloseOnExec s
+        -- NoDelay causes an error for AF_UNIX.
+        Socket.setSocketOption s Socket.NoDelay 1 `Exception.catch` Vendor.throughAsync (pure ())
+        conn <- WarpInternal.socketConnection settings s
+        pure (conn, sa)
+
+    closeListenSocket = Socket.close socket
+
+{- | The connection setup action would be expensive. A good example
+is initialization of TLS.
+So, this converts the connection setup action to the connection maker
+which will be executed after forking a new worker thread.
+Then this calls 'runSettingsConnectionMaker' with the connection maker.
+This allows the expensive computations to be performed
+in a separate worker thread instead of the main server loop.
+-}
+runSettingsConnection :: Warp.Settings -> IO (WarpInternal.Connection, Socket.SockAddr) -> Application -> IO ()
+runSettingsConnection settings getConn app = WarpInternal.runSettingsConnectionMaker settings getConnMaker app
+  where
+    getConnMaker = do
+        (conn, sa) <- getConn
+        pure (pure conn, sa)

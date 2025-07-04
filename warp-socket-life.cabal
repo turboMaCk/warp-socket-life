@@ -62,13 +62,17 @@ library
     exposed-modules:  Server
 
     -- Modules included in this library but not exported.
-    -- other-modules:
+    other-modules: Vendor
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.19.2.0
+                    , wai
+                    , warp
+                    , network
+                    , streaming-commons
 
     -- Directories containing source files.
     hs-source-dirs:   lib
@@ -93,7 +97,6 @@ executable warp-socket-life
     build-depends:
         base ^>=4.19.2.0,
         wai,
-        warp,
         http-types,
         warp-socket-life
 
