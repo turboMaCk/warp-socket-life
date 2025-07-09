@@ -11,7 +11,10 @@ import Network.Wai (Application)
 
 import qualified Vendor
 
+import Control.Concurrent (MVar)
+import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception as Exception
+import qualified Data.ByteString as ByteString
 import qualified Data.Streaming.Network as Network
 import qualified Network.Socket as Socket
 import qualified Network.Wai.Handler.Warp as Warp
@@ -77,4 +80,72 @@ runSettingsConnection settings getConn app = WarpInternal.runSettingsConnectionM
   where
     getConnMaker = do
         (conn, sa) <- getConn
-        pure (pure conn, sa)
+        pure (harpoonConnection conn, sa)
+
+data ConnectionClosedError
+    = ClientClosedConnection
+    | ResponseWritten
+    | ClientKeepsWriting
+    deriving (Show, Eq, Enum, Ord)
+    deriving anyclass (Exception.Exception)
+
+harpoonConnection :: WarpInternal.Connection -> IO WarpInternal.Connection
+harpoonConnection conn = do
+    targetThread <- Concurrent.myThreadId
+
+    -- Counts number of bytes which were read
+    -- TODO: there might be more lightway abstration for atomic numbers,
+    -- ideally something that could compile to HW instructions?
+    bytesRead :: MVar Int <- Concurrent.newMVar 0
+    -- This stores data which request thread might not have time to consume before monitoring thread kicked in
+    lock :: MVar () <- Concurrent.newMVar ()
+
+    monitorThreadId <- Concurrent.forkFinally (harpoonThread targetThread conn bytesRead 0 lock) (finalized targetThread)
+
+    pure
+        conn
+            { WarpInternal.connClose = connClose monitorThreadId
+            , WarpInternal.connRecv = connRecv bytesRead lock
+            }
+  where
+    -- Close monitor and do perform normal teardown
+    connClose tid =
+        Exception.throwTo tid ResponseWritten
+            >> WarpInternal.connClose conn
+
+    -- Receive ByteString value from connection
+    connRecv bytesRead lock = do
+        -- Before we read from connection lets aquire the lock to it
+        Concurrent.modifyMVar lock $ \() -> do
+            bs <- WarpInternal.connRecv conn
+            Concurrent.modifyMVar_ bytesRead $ \n ->
+                pure $ ByteString.length bs + n
+            pure ((), bs)
+
+    finalized tid _res =
+        putStrLn $ show tid <> " monitoring finished"
+
+harpoonThread :: Concurrent.ThreadId -> WarpInternal.Connection -> MVar Int -> Int -> MVar () -> IO ()
+harpoonThread tid conn bytesRead readSoFar lock = do
+    Concurrent.threadDelay oneSecondInMicros
+
+    n <- Concurrent.readMVar bytesRead
+    putStrLn $ "read " <> show n
+    putStrLn $ "read so far " <> show readSoFar
+
+    -- Nothing is reading the data from the connection
+    -- lets take over
+    if n <= readSoFar
+        then do
+            closed <- Concurrent.modifyMVar lock $ \() -> do
+                bs <- WarpInternal.connRecv conn
+                -- If byte string was empty we know the client closed connection
+                pure ((), ByteString.null bs)
+
+            Exception.throwTo tid $ if closed then ClientClosedConnection else ClientKeepsWriting
+        else continue n
+  where
+    continue n =
+        harpoonThread tid conn bytesRead n lock
+
+    oneSecondInMicros = 1000000

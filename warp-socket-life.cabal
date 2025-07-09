@@ -73,6 +73,7 @@ library
                     , warp
                     , network
                     , streaming-commons
+                    , bytestring
 
     -- Directories containing source files.
     hs-source-dirs:   lib
