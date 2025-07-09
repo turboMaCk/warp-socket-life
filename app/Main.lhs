@@ -1,5 +1,28 @@
 > {-# LANGUAGE OverloadedStrings #-}
 
+Request life cycle:
+
+
+
+                                                      write on closed throws exception
+                               ┌──────────────────┐
+                       ┌───────┼                  ◄───────────────────────┐
+                       │       │      socket      ┌─────────────────────┐ │
+                       │  ┌───►│                  │                     │ │
+                       │  │    └──────────────────┘  read on closed     │ │
+                       │  │                          returns empty      │ │
+                       │  │                          bytestring         │ │
+                       │  │                                             │ │
+                       │  │                                             │ │
+                       │  │                                             │ │
+                       │  │                                             │ │
+   ┌──────────┐      ┌─▼──┼────────────┐      ┌─────────────────┐      ┌▼─┼───────────────┐      ┌──────────┐
+   │          │      │                 │      │                 │      │                  │      │          │
+   │  client  ├──────►  reverse proxy  ┼──────►   warp server   ┼──────►  request thread  ┼──────► database │
+   │          │      │                 │      │                 │      │                  │      │          │
+   └──────────┘      └─────────────────┘      └─────────────────┘      └──────────────────◄──────┴──────────┘
+
+
 > module Main where
 
 > import qualified Control.Concurrent as Concurrent
@@ -30,7 +53,7 @@
 >                     Concurrent.threadDelay 1000000
 >                     wait (n - 1)
 
-Instead of WARP We're going to run server using our lib module:
+Instead of WARP We're using our custom lib wrapper around it:
 
 > main :: IO ()
 > main = do
